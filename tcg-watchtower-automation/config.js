@@ -3,8 +3,8 @@ require('dotenv').config();
 const config = {
   // Discord Configuration
   discord: {
-    token: process.env.DISCORD_TOKEN,
-    monitoredChannels: process.env.MONITORED_CHANNELS 
+    token: process.env.MTQ3OTc0MTI5MzMzNTY3NDkyMQ.G7VAP0.dNuCRO9yFWYvlHq32BUVfuCnc4BQtYXYOMHpc4,
+    monitoredChannels: process.env.1404576142802944020,1392194609169305641
       ? process.env.MONITORED_CHANNELS.split(',').map(id => id.trim())
       : [],
   },
