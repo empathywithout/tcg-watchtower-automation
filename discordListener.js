@@ -55,50 +55,58 @@ class DiscordListener {
   }
 
   /**
-   * Delay processing to wait for Discord embeds to fully attach (they arrive ~500ms after message)
+   * Entry point for messageCreate.
+   * - If the message already has an embed, process it immediately (no delay).
+   * - If not, claim the ID and wait for messageUpdate to bring the embed.
    */
   async onMessageWithDelay(message) {
-    // Wait 1.5s for embeds to attach before processing
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    
-    // Re-fetch the message to get the fully-populated version with embeds
-    try {
-      const fullMessage = await message.fetch();
-      await this.onMessage(fullMessage);
-    } catch (error) {
-      // Fallback to original message if fetch fails
-      await this.onMessage(message);
+    // Claim ID immediately to block any duplicate paths
+    if (this.processedMessageIds.has(message.id)) {
+      logger.debug('Message already claimed, skipping', { messageId: message.id });
+      return;
+    }
+    this.processedMessageIds.add(message.id);
+    setTimeout(() => this.processedMessageIds.delete(message.id), 10 * 60 * 1000);
+
+    if (message.embeds && message.embeds.length > 0) {
+      // Embed already present — process immediately, no delay needed
+      logger.debug('Embed present on messageCreate, processing immediately');
+      await this.onMessage(message, true);
+    } else {
+      // No embed yet — messageUpdate will fire once Discord attaches it
+      logger.debug('No embed on messageCreate, waiting for messageUpdate', { messageId: message.id });
     }
   }
 
   /**
-   * Handle message updates (Discord sometimes fires this when embeds load)
-   * We ignore these since onMessageWithDelay already handles embed loading
+   * Handle message updates.
+   * Fires when Discord attaches an embed to a message after the fact.
+   * Since we claimed the ID in onMessageWithDelay, we use a separate
+   * pendingEmbedIds set to know we should process this update.
    */
   async onMessageUpdate(oldMessage, newMessage) {
-    // Only process if the message now has embeds but didn't before
-    // AND we haven't already processed this message ID
     const hadEmbeds = oldMessage.embeds && oldMessage.embeds.length > 0;
     const hasEmbeds = newMessage.embeds && newMessage.embeds.length > 0;
 
-    if (!hadEmbeds && hasEmbeds && !this.processedMessageIds.has(newMessage.id)) {
-      logger.debug('Message updated with new embeds, processing', { messageId: newMessage.id });
-      try {
-        const fullMessage = await newMessage.fetch();
-        await this.onMessage(fullMessage);
-      } catch (error) {
-        await this.onMessage(newMessage);
+    // Only care about messages that just gained an embed for the first time
+    if (!hadEmbeds && hasEmbeds) {
+      // Check if we claimed this ID (i.e. it came through our monitored channel)
+      if (this.processedMessageIds.has(newMessage.id)) {
+        // We own this message — process it now that the embed has arrived
+        logger.debug('Embed arrived via messageUpdate, processing now', { messageId: newMessage.id });
+        await this.onMessage(newMessage, true);
       }
     }
   }
 
   /**
-   * Handle new messages
+   * Handle new messages.
+   * @param {boolean} alreadyClaimed - true if onMessageWithDelay already claimed the ID
    */
-  async onMessage(message) {
+  async onMessage(message, alreadyClaimed = false) {
     try {
       // Check if we've already processed this exact message ID (prevents double processing)
-      if (this.processedMessageIds.has(message.id)) {
+      if (!alreadyClaimed && this.processedMessageIds.has(message.id)) {
         logger.debug('Message already processed, skipping', { messageId: message.id });
         return;
       }
@@ -156,10 +164,11 @@ class DiscordListener {
         return;
       }
 
-      // Mark this message ID as processed to prevent double posting
-      this.processedMessageIds.add(message.id);
-      // Clean up old message IDs after 10 minutes to prevent memory leak
-      setTimeout(() => this.processedMessageIds.delete(message.id), 10 * 60 * 1000);
+      // If not already claimed by onMessageWithDelay, claim now (e.g. messageUpdate path)
+      if (!alreadyClaimed) {
+        this.processedMessageIds.add(message.id);
+        setTimeout(() => this.processedMessageIds.delete(message.id), 10 * 60 * 1000);
+      }
 
       // Process the message
       await this.processMessage(message);
