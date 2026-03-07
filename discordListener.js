@@ -62,15 +62,32 @@ class DiscordListener {
         channelId: message.channel.id,
         channelName: message.channel.name,
         author: message.author.tag,
+        authorId: message.author.id,
         isBot: message.author.bot,
         hasEmbeds: message.embeds.length > 0,
         contentLength: message.content?.length || 0,
       });
 
-      // Ignore bot messages
+      // Allow messages from specific bots (like TCG Watchtower Monitors), ignore all others
       if (message.author.bot) {
-        logger.debug('Ignoring bot message');
-        return;
+        const allowedBots = config.discord.allowedBots;
+        
+        const isAllowedBot = allowedBots.some(allowed => 
+          message.author.tag.includes(allowed) || 
+          message.author.username.includes(allowed)
+        );
+        
+        if (!isAllowedBot) {
+          logger.debug('Ignoring bot message (not in allowed list)', {
+            bot: message.author.tag,
+            allowedBots: allowedBots
+          });
+          return;
+        } else {
+          logger.debug('Allowing message from whitelisted bot', {
+            bot: message.author.tag
+          });
+        }
       }
 
       // Check if message is from a monitored channel

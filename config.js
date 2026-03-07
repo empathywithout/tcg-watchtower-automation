@@ -7,6 +7,9 @@ const config = {
     monitoredChannels: process.env.MONITORED_CHANNELS 
       ? process.env.MONITORED_CHANNELS.split(',').map(id => id.trim())
       : [],
+    allowedBots: process.env.ALLOWED_BOTS
+      ? process.env.ALLOWED_BOTS.split(',').map(name => name.trim())
+      : ['TCG Watchtower Monitors'],
   },
 
   // Twitter Configuration
