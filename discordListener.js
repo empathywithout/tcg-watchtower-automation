@@ -11,6 +11,7 @@ class DiscordListener {
   constructor() {
     this.client = null;
     this.isReady = false;
+    this.processedMessageIds = new Set(); // Track processed message IDs to prevent duplicates
   }
 
   /**
@@ -29,7 +30,8 @@ class DiscordListener {
 
     // Event handlers
     this.client.on('ready', () => this.onReady());
-    this.client.on('messageCreate', (message) => this.onMessage(message));
+    this.client.on('messageCreate', (message) => this.onMessageWithDelay(message));
+    this.client.on('messageUpdate', (oldMessage, newMessage) => this.onMessageUpdate(oldMessage, newMessage));
     this.client.on('error', (error) => this.onError(error));
     this.client.on('warn', (warning) => this.onWarning(warning));
 
@@ -53,10 +55,54 @@ class DiscordListener {
   }
 
   /**
+   * Delay processing to wait for Discord embeds to fully attach (they arrive ~500ms after message)
+   */
+  async onMessageWithDelay(message) {
+    // Wait 1.5s for embeds to attach before processing
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    
+    // Re-fetch the message to get the fully-populated version with embeds
+    try {
+      const fullMessage = await message.fetch();
+      await this.onMessage(fullMessage);
+    } catch (error) {
+      // Fallback to original message if fetch fails
+      await this.onMessage(message);
+    }
+  }
+
+  /**
+   * Handle message updates (Discord sometimes fires this when embeds load)
+   * We ignore these since onMessageWithDelay already handles embed loading
+   */
+  async onMessageUpdate(oldMessage, newMessage) {
+    // Only process if the message now has embeds but didn't before
+    // AND we haven't already processed this message ID
+    const hadEmbeds = oldMessage.embeds && oldMessage.embeds.length > 0;
+    const hasEmbeds = newMessage.embeds && newMessage.embeds.length > 0;
+
+    if (!hadEmbeds && hasEmbeds && !this.processedMessageIds.has(newMessage.id)) {
+      logger.debug('Message updated with new embeds, processing', { messageId: newMessage.id });
+      try {
+        const fullMessage = await newMessage.fetch();
+        await this.onMessage(fullMessage);
+      } catch (error) {
+        await this.onMessage(newMessage);
+      }
+    }
+  }
+
+  /**
    * Handle new messages
    */
   async onMessage(message) {
     try {
+      // Check if we've already processed this exact message ID (prevents double processing)
+      if (this.processedMessageIds.has(message.id)) {
+        logger.debug('Message already processed, skipping', { messageId: message.id });
+        return;
+      }
+
       // DEBUG: Log every message received
       logger.debug('Discord message event fired', {
         channelId: message.channel.id,
@@ -109,6 +155,11 @@ class DiscordListener {
         logger.warning('Duplicate ignored');
         return;
       }
+
+      // Mark this message ID as processed to prevent double posting
+      this.processedMessageIds.add(message.id);
+      // Clean up old message IDs after 10 minutes to prevent memory leak
+      setTimeout(() => this.processedMessageIds.delete(message.id), 10 * 60 * 1000);
 
       // Process the message
       await this.processMessage(message);

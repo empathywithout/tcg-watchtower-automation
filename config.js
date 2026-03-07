@@ -59,6 +59,7 @@ const config = {
   defaultHashtags: process.env.DEFAULT_HASHTAGS 
     ? process.env.DEFAULT_HASHTAGS.split(',').map(tag => tag.trim())
     : ['#TCGDeals', '#TCGWatchtower'],
+
 };
 
 // Validation

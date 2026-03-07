@@ -29,6 +29,11 @@ class MessageProcessor {
         productInfo.productName = embed.title;
         productInfo.rawContent = embed.title; // Use title as raw content
       }
+
+      // Extract the embed URL — this is the affiliate link attached to the clickable title
+      if (embed.url) {
+        productInfo.affiliateLink = embed.url;
+      }
       
       // Extract description for additional info
       if (embed.description) {
@@ -206,16 +211,20 @@ class MessageProcessor {
       tweet += `💰 ${productInfo.price}\n\n`;
     }
 
-    // Add link - prefer Amazon, then others
+    // Add link - PRIORITY: embed title URL (true affiliate link), then Links field fallback
     let linkToUse = null;
     let linkName = null;
-    
-    if (productInfo.allLinks && productInfo.allLinks.length > 0) {
-      // Prefer order: Amazon, Target, Walmart, eBay, then others
+
+    if (productInfo.affiliateLink) {
+      // embed.url on the title is always the true affiliate link
+      linkToUse = productInfo.affiliateLink;
+    } else if (productInfo.allLinks && productInfo.allLinks.length > 0) {
+      // Fallback: pick from Links field, skipping utility-only tools
+      const utilityPlatforms = ['keepa', 'selleramp', 'google'];
       const preferredOrder = ['amazon', 'target', 'walmart', 'ebay'];
-      
+
       for (const preferred of preferredOrder) {
-        const found = productInfo.allLinks.find(l => 
+        const found = productInfo.allLinks.find(l =>
           l.name.toLowerCase().includes(preferred)
         );
         if (found) {
@@ -224,11 +233,13 @@ class MessageProcessor {
           break;
         }
       }
-      
-      // If no preferred link found, use first one
-      if (!linkToUse && productInfo.allLinks.length > 0) {
-        linkToUse = productInfo.allLinks[0].url;
-        linkName = productInfo.allLinks[0].name;
+
+      if (!linkToUse) {
+        const buyLink = productInfo.allLinks.find(l =>
+          !utilityPlatforms.some(u => l.name.toLowerCase().includes(u))
+        );
+        linkToUse = buyLink ? buyLink.url : productInfo.allLinks[0].url;
+        linkName = buyLink ? buyLink.name : productInfo.allLinks[0].name;
       }
     } else if (productInfo.link) {
       linkToUse = productInfo.link;
@@ -344,7 +355,7 @@ class MessageProcessor {
     return {
       product_name: productInfo.productName || 'Unknown Product',
       price: productInfo.price || null,
-      affiliate_link: productInfo.link || null,
+      affiliate_link: productInfo.affiliateLink || productInfo.link || null,
       image_url: productInfo.images.length > 0 ? productInfo.images[0].url : null,
       timestamp: new Date().toISOString(),
       source_message_id: messageId,
