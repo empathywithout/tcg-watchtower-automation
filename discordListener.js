@@ -57,13 +57,28 @@ class DiscordListener {
    */
   async onMessage(message) {
     try {
+      // DEBUG: Log every message received
+      logger.debug('Discord message event fired', {
+        channelId: message.channel.id,
+        channelName: message.channel.name,
+        author: message.author.tag,
+        isBot: message.author.bot,
+        hasEmbeds: message.embeds.length > 0,
+        contentLength: message.content?.length || 0,
+      });
+
       // Ignore bot messages
       if (message.author.bot) {
+        logger.debug('Ignoring bot message');
         return;
       }
 
       // Check if message is from a monitored channel
       if (!config.discord.monitoredChannels.includes(message.channel.id)) {
+        logger.debug('Channel not monitored', {
+          channelId: message.channel.id,
+          monitoredChannels: config.discord.monitoredChannels,
+        });
         return;
       }
 
