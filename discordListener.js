@@ -125,24 +125,47 @@ class DiscordListener {
     // Extract product information
     const productInfo = messageProcessor.extractProductInfo(message);
 
+    // Check if this is a Pokemon Center queue alert
+    const isQueueAlert = messageProcessor.isPokemonCenterQueueAlert(message, productInfo);
+
+    if (isQueueAlert) {
+      logger.info('Pokemon Center queue alert detected!');
+      productInfo.isPokemonCenterQueue = true;
+      productInfo.productName = 'Pokemon Center Queue Live'; // Set a product name for validation
+    }
+
     // Validate product info
     if (!messageProcessor.isValidProductInfo(productInfo)) {
       logger.warning('Invalid product info - skipped');
       return;
     }
 
-    logger.info('Processing restock', {
-      product: productInfo.productName?.substring(0, 30) || 'N/A',
-      price: productInfo.price,
-    });
+    if (isQueueAlert) {
+      logger.info('Processing Pokemon Center queue alert');
+    } else {
+      logger.info('Processing restock', {
+        product: productInfo.productName?.substring(0, 30) || 'N/A',
+        price: productInfo.price,
+      });
+    }
 
     // Prepare distribution tasks - all execute in parallel
     const tasks = [];
 
     // Twitter
     if (config.features.enableTwitter) {
-      const tweetText = messageProcessor.formatForTwitter(productInfo);
-      const imageUrls = productInfo.images.map(img => img.url);
+      let tweetText;
+      let imageUrls = [];
+
+      if (isQueueAlert) {
+        // Special tweet for queue alerts
+        tweetText = messageProcessor.formatPokemonCenterQueueAlert();
+      } else {
+        // Normal product tweet
+        tweetText = messageProcessor.formatForTwitter(productInfo);
+        imageUrls = productInfo.images.map(img => img.url);
+      }
+
       tasks.push(
         twitterPoster.queueTweet(tweetText, imageUrls)
           .then(result => ({ platform: 'Twitter', ...result }))
@@ -151,16 +174,29 @@ class DiscordListener {
 
     // Reddit
     if (config.features.enableReddit) {
-      const { title, body } = messageProcessor.formatForReddit(productInfo);
-      const imageUrl = productInfo.images.length > 0 ? productInfo.images[0].url : null;
+      let title, body;
+
+      if (isQueueAlert) {
+        // Special Reddit post for queue alerts
+        title = '🚨 Pokemon Center Queue is LIVE!';
+        body = `The Pokemon Center waiting room/security queue is now active!\n\n**Get ready to purchase!**\n\n**Link:** https://www.pokemoncenter.com\n\n---\n\n*Track more restocks at [TCGWatchtower.com](https://tcgwatchtower.com)*`;
+      } else {
+        // Normal product post
+        const formatted = messageProcessor.formatForReddit(productInfo);
+        title = formatted.title;
+        body = formatted.body;
+      }
+
+      const imageUrl = !isQueueAlert && productInfo.images.length > 0 ? productInfo.images[0].url : null;
+      
       tasks.push(
         redditPoster.queuePost(title, body, imageUrl)
           .then(result => ({ platform: 'Reddit', ...result }))
       );
     }
 
-    // Website API
-    if (config.features.enableWebsite) {
+    // Website API (skip for queue alerts unless you want to track them)
+    if (config.features.enableWebsite && !isQueueAlert) {
       const websiteData = messageProcessor.formatForWebsite(
         productInfo,
         message.id,

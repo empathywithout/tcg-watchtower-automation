@@ -27,6 +27,7 @@ class MessageProcessor {
       // Extract title as product name
       if (embed.title) {
         productInfo.productName = embed.title;
+        productInfo.rawContent = embed.title; // Use title as raw content
       }
       
       // Extract description for additional info
@@ -106,9 +107,15 @@ class MessageProcessor {
         // Extract timestamp or source info if needed
         productInfo.source = footerText;
       }
+      
+      // If we got data from embed, return early (don't use text content)
+      if (productInfo.productName || productInfo.price || productInfo.link) {
+        logger.debug('Extracted product info from embed', productInfo);
+        return productInfo;
+      }
     }
 
-    // PRIORITY 2: Extract from plain text content (fallback)
+    // PRIORITY 2: Extract from plain text content (fallback - only if no embed)
     if (!productInfo.productName) {
       for (const line of lines) {
         const cleanLine = line.replace(/[🚨⚡️✨💎]/g, '').trim();
@@ -176,17 +183,15 @@ class MessageProcessor {
    */
   formatForTwitter(productInfo) {
     let tweet = '';
-    
-    // Add restock alert indicator
-    tweet += '🚨 RESTOCK\n\n';
 
-    // Add product name
+    // Add product name (clean it up first)
     if (productInfo.productName) {
-      let productName = productInfo.productName;
-      // Clean up product name
-      productName = productName
+      let productName = productInfo.productName
         .replace(/Item Restocked/i, '')
         .replace(/Restock Alert/i, '')
+        .replace(/\[<@&\d+>\]/g, '') // Remove Discord role mentions like [<@&1413588590637617223>]
+        .replace(/\(Ping ID: \d+\)/g, '') // Remove ping IDs
+        .replace(/@\s*\$[\d.]+/g, '') // Remove @ $price format
         .trim();
       
       tweet += productName;
@@ -201,26 +206,41 @@ class MessageProcessor {
       tweet += `💰 ${productInfo.price}\n\n`;
     }
 
-    // Add link (prefer first link from allLinks or use link)
-    let linkToUse = productInfo.link;
+    // Add link - prefer Amazon, then others
+    let linkToUse = null;
+    let linkName = null;
     
-    // If we have multiple links, prefer certain retailers
     if (productInfo.allLinks && productInfo.allLinks.length > 0) {
       // Prefer order: Amazon, Target, Walmart, eBay, then others
-      const preferred = ['amazon', 'target', 'walmart'];
-      const preferredLink = productInfo.allLinks.find(l => 
-        preferred.some(p => l.name.toLowerCase().includes(p))
-      );
+      const preferredOrder = ['amazon', 'target', 'walmart', 'ebay'];
       
-      if (preferredLink) {
-        linkToUse = preferredLink.url;
-        tweet += `🛒 ${preferredLink.name}: ${linkToUse}\n\n`;
-      } else {
+      for (const preferred of preferredOrder) {
+        const found = productInfo.allLinks.find(l => 
+          l.name.toLowerCase().includes(preferred)
+        );
+        if (found) {
+          linkToUse = found.url;
+          linkName = found.name;
+          break;
+        }
+      }
+      
+      // If no preferred link found, use first one
+      if (!linkToUse && productInfo.allLinks.length > 0) {
         linkToUse = productInfo.allLinks[0].url;
+        linkName = productInfo.allLinks[0].name;
+      }
+    } else if (productInfo.link) {
+      linkToUse = productInfo.link;
+    }
+
+    // Add the link
+    if (linkToUse) {
+      if (linkName) {
+        tweet += `🔗 ${linkName}: ${linkToUse}\n\n`;
+      } else {
         tweet += `🔗 ${linkToUse}\n\n`;
       }
-    } else if (linkToUse) {
-      tweet += `🔗 ${linkToUse}\n\n`;
     }
 
     // Add hashtags
@@ -228,10 +248,9 @@ class MessageProcessor {
       ? productInfo.hashtags 
       : config.defaultHashtags;
     
-    // Ensure we don't exceed 280 characters
     let hashtagString = hashtags.join(' ');
     
-    // Check length and trim if necessary
+    // Ensure we don't exceed 280 characters
     while ((tweet + hashtagString).length > 280 && hashtags.length > 0) {
       hashtags.pop();
       hashtagString = hashtags.join(' ');
@@ -241,19 +260,32 @@ class MessageProcessor {
 
     // Final length check - if still too long, trim product name
     if (tweet.length > 280) {
-      // Rebuild with shorter product name
-      const maxProductNameLength = 100;
+      const maxProductNameLength = 80;
       let shortProductName = productInfo.productName || 'Product';
+      
+      // Clean product name
+      shortProductName = shortProductName
+        .replace(/\[<@&\d+>\]/g, '')
+        .replace(/\(Ping ID: \d+\)/g, '')
+        .replace(/@\s*\$[\d.]+/g, '')
+        .trim();
+      
       if (shortProductName.length > maxProductNameLength) {
         shortProductName = shortProductName.substring(0, maxProductNameLength) + '...';
       }
       
-      tweet = '🚨 RESTOCK\n\n' + shortProductName + '\n\n';
+      tweet = shortProductName + '\n\n';
+      
       if (productInfo.price) {
         tweet += `💰 ${productInfo.price}\n\n`;
       }
+      
       if (linkToUse) {
-        tweet += `🔗 ${linkToUse}\n\n`;
+        if (linkName) {
+          tweet += `🔗 ${linkName}: ${linkToUse}\n\n`;
+        } else {
+          tweet += `🔗 ${linkToUse}\n\n`;
+        }
       }
       
       // Try hashtags again
@@ -325,6 +357,11 @@ class MessageProcessor {
    * Validate that product info is sufficient for posting
    */
   isValidProductInfo(productInfo) {
+    // Special case: Pokemon Center queue alerts
+    if (productInfo.isPokemonCenterQueue) {
+      return true; // Always valid for queue alerts
+    }
+
     // At minimum, we need either a product name or a link
     if (!productInfo.productName && !productInfo.link) {
       logger.warning('Product info validation failed: missing product name and link');
@@ -332,6 +369,52 @@ class MessageProcessor {
     }
 
     return true;
+  }
+
+  /**
+   * Check if message is a Pokemon Center queue alert
+   */
+  isPokemonCenterQueueAlert(message, productInfo) {
+    const content = (message.content || '').toLowerCase();
+    const embedContent = productInfo.rawContent?.toLowerCase() || '';
+    const combinedContent = content + ' ' + embedContent;
+
+    // Check for queue-related keywords
+    const queueKeywords = [
+      'queue',
+      'security',
+      'waiting room',
+      'queue is live',
+      'security is up',
+      'queue active'
+    ];
+
+    const hasQueueKeyword = queueKeywords.some(keyword => 
+      combinedContent.includes(keyword)
+    );
+
+    // Check if it's from Pokemon Center channel (using config)
+    const isPokemonCenterChannel = config.discord.pokemonCenterChannelId && 
+                                    message.channel.id === config.discord.pokemonCenterChannelId;
+
+    return hasQueueKeyword && isPokemonCenterChannel;
+  }
+
+  /**
+   * Format Pokemon Center queue alert for Twitter
+   */
+  formatPokemonCenterQueueAlert() {
+    const tweet = `🚨 POKEMON CENTER QUEUE IS LIVE!
+
+The Pokemon Center waiting room/security queue is now active!
+
+Get ready to purchase!
+
+🔗 https://www.pokemoncenter.com
+
+#PokemonCenter #TCGDeals #Queue`;
+
+    return tweet;
   }
 }
 

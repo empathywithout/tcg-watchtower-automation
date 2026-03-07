@@ -10,6 +10,7 @@ const config = {
     allowedBots: process.env.ALLOWED_BOTS
       ? process.env.ALLOWED_BOTS.split(',').map(name => name.trim())
       : ['TCG Watchtower Monitors'],
+    pokemonCenterChannelId: process.env.POKEMON_CENTER_CHANNEL_ID || null,
   },
 
   // Twitter Configuration
