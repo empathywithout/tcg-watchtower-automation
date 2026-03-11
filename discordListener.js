@@ -11,7 +11,8 @@ class DiscordListener {
   constructor() {
     this.client = null;
     this.isReady = false;
-    this.processedMessageIds = new Set(); // Track processed message IDs to prevent duplicates
+    this.processedMessageIds = new Set(); // Track claimed message IDs to prevent double-pickup
+    this.fullyProcessedIds = new Set();   // Track fully distributed messages to prevent duplicate posts (Bug 2 fix)
   }
 
   /**
@@ -60,6 +61,9 @@ class DiscordListener {
    * - If not, claim the ID and wait for messageUpdate to bring the embed.
    */
   async onMessageWithDelay(message) {
+    // Ignore unmonitored channels before doing anything (Bug 3 fix)
+    if (!config.discord.monitoredChannels.includes(message.channel.id)) return;
+
     // Claim ID immediately to block any duplicate paths
     if (this.processedMessageIds.has(message.id)) {
       logger.debug('Message already claimed, skipping', { messageId: message.id });
@@ -85,6 +89,9 @@ class DiscordListener {
    * pendingEmbedIds set to know we should process this update.
    */
   async onMessageUpdate(oldMessage, newMessage) {
+    // Bug 2 fix: skip if already fully processed to prevent duplicate posts
+    if (this.fullyProcessedIds.has(newMessage.id)) return;
+
     const hadEmbeds = oldMessage.embeds && oldMessage.embeds.length > 0;
     const hasEmbeds = newMessage.embeds && newMessage.embeds.length > 0;
 
@@ -105,9 +112,15 @@ class DiscordListener {
    */
   async onMessage(message, alreadyClaimed = false) {
     try {
-      // Check if we've already processed this exact message ID (prevents double processing)
+      // Bug 2 fix: use fullyProcessedIds as the authoritative guard — can never be bypassed
+      if (this.fullyProcessedIds.has(message.id)) {
+        logger.debug('Message already fully processed, skipping', { messageId: message.id });
+        return;
+      }
+
+      // Also guard against unclaimed messages hitting this path directly
       if (!alreadyClaimed && this.processedMessageIds.has(message.id)) {
-        logger.debug('Message already processed, skipping', { messageId: message.id });
+        logger.debug('Message already claimed, skipping', { messageId: message.id });
         return;
       }
 
@@ -157,12 +170,6 @@ class DiscordListener {
         channel: message.channel.name,
         author: message.author.tag,
       });
-
-      // Check for duplicates
-      if (duplicateDetector.isDuplicate(message.content)) {
-        logger.warning('Duplicate ignored');
-        return;
-      }
 
       // If not already claimed by onMessageWithDelay, claim now (e.g. messageUpdate path)
       if (!alreadyClaimed) {
@@ -284,7 +291,11 @@ class DiscordListener {
     ).length;
 
     logger.success(`Distributed: ${successCount}/${results.length} platforms (${elapsed}ms)`);
-    
+
+    // Mark as fully processed so messageUpdate can never re-trigger this message (Bug 2 fix)
+    this.fullyProcessedIds.add(message.id);
+    setTimeout(() => this.fullyProcessedIds.delete(message.id), 10 * 60 * 1000);
+
     // Log failures only
     results.forEach((result, index) => {
       if (result.status === 'fulfilled' && !result.value.success) {
