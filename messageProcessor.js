@@ -106,11 +106,16 @@ class MessageProcessor {
         });
       }
       
-      // Extract footer info (like "TCG Watchtower Monitors • Target • 11:27:00...")
+      // Extract footer info (like "TCG Watchtower Monitors • Target • 11:27:00 AM EST")
+      // Strip the trailing timestamp so the source is stable across repeated alerts
+      // for the same product — otherwise the cache key changes every time and
+      // duplicates are never caught.
       if (embed.footer && embed.footer.text) {
         const footerText = embed.footer.text;
-        // Extract timestamp or source info if needed
-        productInfo.source = footerText;
+        // Remove time portion: "• HH:MM:SS AM/PM TZ" at the end
+        productInfo.source = footerText
+          .replace(/•\s*\d{1,2}:\d{2}(:\d{2})?(\.\d+)?(\s*(AM|PM))?(\s*\w+)?\s*$/i, '')
+          .trim();
       }
       
       // If we got data from embed, return early (don't use text content)

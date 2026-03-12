@@ -1,4 +1,6 @@
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const logger = require('./logger');
 const { config } = require('./config');
 
@@ -6,60 +8,87 @@ const { config } = require('./config');
  * Result shapes returned by checkAndRecord():
  *
  *   { action: 'post'    }  — Never seen before. Post normally.
- *                            This is ALWAYS the result for a brand-new product, no matter
- *                            what else is in the cache. New items are never blocked.
- *
- *   { action: 'suppress'}  — Same product+retailer+channel was already posted within
- *                            suppressWindow (default 15 min). Drop silently.
- *
- *   { action: 'restock' }  — suppressWindow has expired (item was posted >15 min ago)
- *                            but the item is still bouncing in/out of stock within the
- *                            restockWindow (default 120 min). Post again with a note.
- *                            After this post, a fresh suppressWindow starts again so
- *                            rapid follow-up alerts are still blocked.
+ *   { action: 'suppress'}  — Same product+retailer+channel within suppressWindow. Drop silently.
+ *   { action: 'restock' }  — Past suppressWindow but within restockWindow. Post with note.
  *
  * The key is: channelId + normalised product name + retailer (from embed footer).
  * Target vs Walmart = different keys = both always post independently.
+ *
+ * PERSISTENCE: Cache is saved to disk on every write so it survives bot restarts,
+ * crashes, and redeploys. Without this, a restart during an active restock window
+ * causes the bot to re-post the same product as if it were brand new.
  */
+
+const CACHE_FILE = path.join(__dirname, '.duplicate-cache.json');
 
 class DuplicateDetector {
   constructor() {
-    // key -> { firstSeen: ms, lastSeen: ms, postCount: number }
     this.cache = new Map();
+    this.loadFromDisk();
     this.startCleanupInterval();
   }
 
-  /**
-   * Build a stable cache key from channel + product name + retailer.
-   * Retailer is kept in the key so the same product at different stores never conflicts.
-   */
+  // ---------------------------------------------------------------------------
+  // Persistence
+  // ---------------------------------------------------------------------------
+
+  loadFromDisk() {
+    try {
+      if (fs.existsSync(CACHE_FILE)) {
+        const raw = fs.readFileSync(CACHE_FILE, 'utf8');
+        const entries = JSON.parse(raw);
+        for (const [key, entry] of entries) {
+          this.cache.set(key, entry);
+        }
+        logger.info(`Duplicate cache loaded from disk (${this.cache.size} entries)`);
+        this._purgeExpired(); // Drop anything already past restockWindow
+      } else {
+        logger.debug('No duplicate cache file found — starting fresh');
+      }
+    } catch (err) {
+      logger.warning('Could not load duplicate cache from disk — starting fresh', {
+        error: err.message,
+      });
+      this.cache = new Map();
+    }
+  }
+
+  saveToDisk() {
+    try {
+      const entries = Array.from(this.cache.entries());
+      const tmp = CACHE_FILE + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(entries), 'utf8');
+      fs.renameSync(tmp, CACHE_FILE);
+    } catch (err) {
+      logger.warning('Could not save duplicate cache to disk', { error: err.message });
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Key building
+  // ---------------------------------------------------------------------------
+
   buildKey(channelId, productName, source) {
     const normName = (productName || '')
       .toLowerCase()
-      .replace(/\[<@&\d+>\]/g, '')           // Discord role mentions
-      .replace(/\(ping id: \d+\)/gi, '')      // ping IDs
-      .replace(/@?\s*\$[\d.,]+/g, '')         // prices
+      .replace(/\[<@&\d+>\]/g, '')
+      .replace(/\(ping id: \d+\)/gi, '')
+      .replace(/@?\s*\$[\d.,]+/g, '')
       .replace(/item restocked|restock alert/gi, '')
+      .replace(/\[(high|low|limited|in)\s*stock\]/gi, '')  // strip stock level tags
       .replace(/[^a-z0-9\s]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
 
-    // Source footer looks like "TCG Watchtower Monitors • Target • 11:27:00 AM EST"
-    // Keeping it in the key means Target and Walmart are treated as separate products.
     const normSource = (source || '').toLowerCase().trim();
-
     const raw = `${channelId}|${normName}|${normSource}`;
     return crypto.createHash('sha256').update(raw).digest('hex');
   }
 
-  /**
-   * Check a product against the cache and record it.
-   *
-   * @param {string} channelId   - Discord channel ID the message came from
-   * @param {string} productName - Extracted product name
-   * @param {string} source      - embed.footer.text (contains retailer name)
-   * @returns {{ action: 'post'|'suppress'|'restock' }}
-   */
+  // ---------------------------------------------------------------------------
+  // Core check
+  // ---------------------------------------------------------------------------
+
   checkAndRecord(channelId, productName, source) {
     const key = this.buildKey(channelId, productName, source);
     const now = Date.now();
@@ -70,7 +99,6 @@ class DuplicateDetector {
       const ageSinceFirst = now - entry.firstSeen;
 
       if (ageSinceLast < config.suppressWindow) {
-        // Posted too recently — drop silently
         logger.warning('Duplicate suppressed', {
           product: (productName || '').substring(0, 50),
           channel: channelId,
@@ -80,11 +108,9 @@ class DuplicateDetector {
       }
 
       if (config.restockWindow > 0 && ageSinceFirst < config.restockWindow) {
-        // Past the suppress window but still in the restock observation window —
-        // post with a "still restocking" note and reset lastSeen so the next
-        // suppress window starts fresh from this post.
         entry.lastSeen = now;
         entry.postCount += 1;
+        this.saveToDisk();
         logger.info('Restock repeat — posting with still-restocking note', {
           product: (productName || '').substring(0, 50),
           postCount: entry.postCount,
@@ -92,13 +118,11 @@ class DuplicateDetector {
         return { action: 'restock' };
       }
 
-      // Both windows fully expired — treat as a fresh new post and reset the entry
       this.cache.delete(key);
     }
 
-    // Brand-new product (no cache entry), or fully expired entry that was just cleared.
-    // Always posts normally — a new item can NEVER be blocked by this check.
     this.cache.set(key, { firstSeen: now, lastSeen: now, postCount: 1 });
+    this.saveToDisk();
     logger.debug('New product recorded', {
       product: (productName || '').substring(0, 50),
       channel: channelId,
@@ -107,21 +131,28 @@ class DuplicateDetector {
     return { action: 'post' };
   }
 
-  /**
-   * Periodically purge entries where the full restock window has expired.
-   */
+  // ---------------------------------------------------------------------------
+  // Cleanup
+  // ---------------------------------------------------------------------------
+
+  _purgeExpired() {
+    const now = Date.now();
+    let cleaned = 0;
+    for (const [key, entry] of this.cache.entries()) {
+      if (now - entry.firstSeen > config.restockWindow) {
+        this.cache.delete(key);
+        cleaned++;
+      }
+    }
+    return cleaned;
+  }
+
   startCleanupInterval() {
     setInterval(() => {
-      const now = Date.now();
-      let cleaned = 0;
-      for (const [key, entry] of this.cache.entries()) {
-        if (now - entry.firstSeen > config.restockWindow) {
-          this.cache.delete(key);
-          cleaned++;
-        }
-      }
+      const cleaned = this._purgeExpired();
       if (cleaned > 0) {
         logger.debug(`Cleaned ${cleaned} expired entries from duplicate cache`);
+        this.saveToDisk();
       }
     }, 60_000);
   }
@@ -131,6 +162,7 @@ class DuplicateDetector {
       cacheSize: this.cache.size,
       suppressWindowMinutes: config.suppressWindow / 60000,
       restockWindowMinutes: config.restockWindow / 60000,
+      cacheFile: CACHE_FILE,
     };
   }
 }
