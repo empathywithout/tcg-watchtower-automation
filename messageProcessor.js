@@ -211,11 +211,6 @@ class MessageProcessor {
       tweet += '\u26a0\ufe0f This item keeps going in & out of stock \u2014 keep trying!\n\n';
     }
 
-    // Add price
-    if (productInfo.price) {
-      tweet += `💰 ${productInfo.price}\n\n`;
-    }
-
     // Add link - PRIORITY: embed title URL (true affiliate link), then Links field fallback
     let linkToUse = null;
     let linkName = null;
@@ -291,10 +286,6 @@ class MessageProcessor {
       }
       
       tweet = shortProductName + '\n\n';
-      
-      if (productInfo.price) {
-        tweet += `💰 ${productInfo.price}\n\n`;
-      }
       
       if (linkToUse) {
         if (linkName) {
