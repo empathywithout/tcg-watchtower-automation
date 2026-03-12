@@ -186,7 +186,7 @@ class MessageProcessor {
   /**
    * Format message for Twitter (280 char limit)
    */
-  formatForTwitter(productInfo) {
+  formatForTwitter(productInfo, isRestock = false) {
     let tweet = '';
 
     // Add product name (clean it up first)
@@ -205,6 +205,11 @@ class MessageProcessor {
     }
 
     tweet += '\n\n';
+
+    // Add "still restocking" note if this is a repeat alert
+    if (isRestock) {
+      tweet += '\u26a0\ufe0f This item keeps going in & out of stock \u2014 keep trying!\n\n';
+    }
 
     // Add price
     if (productInfo.price) {

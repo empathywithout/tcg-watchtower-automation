@@ -41,12 +41,16 @@ const config = {
 
   // Rate Limiting
   rateLimits: {
-    twitterInterval: parseInt(process.env.MIN_TWEET_INTERVAL || '3') * 1000, // Convert to ms - default 3s
-    redditInterval: parseInt(process.env.MIN_REDDIT_INTERVAL || '3') * 1000, // default 3s
+    twitterInterval: parseInt(process.env.MIN_TWEET_INTERVAL || '3') * 1000,
+    redditInterval: parseInt(process.env.MIN_REDDIT_INTERVAL || '3') * 1000,
   },
 
   // Duplicate Protection
-  duplicateTimeout: parseInt(process.env.DUPLICATE_TIMEOUT || '10') * 60 * 1000, // Convert to ms
+  // suppressWindow: hard block — same product+retailer+channel won't post within this period (default 15 min)
+  suppressWindow: parseInt(process.env.SUPPRESS_WINDOW_MINUTES || '15') * 60 * 1000,
+  // restockWindow: after suppressWindow expires, if alerts keep coming we post with a "still restocking" note
+  //   Set to 0 to disable the "still restocking" posts entirely.
+  restockWindow: parseInt(process.env.RESTOCK_WINDOW_MINUTES || '120') * 60 * 1000,
 
   // Optional Features
   features: {
@@ -59,7 +63,6 @@ const config = {
   defaultHashtags: process.env.DEFAULT_HASHTAGS 
     ? process.env.DEFAULT_HASHTAGS.split(',').map(tag => tag.trim())
     : ['#TCGDeals', '#TCGWatchtower'],
-
 };
 
 // Validation

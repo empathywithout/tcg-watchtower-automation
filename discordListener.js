@@ -207,10 +207,31 @@ class DiscordListener {
       return;
     }
 
+    // Duplicate / restock check — keyed on channel + product name + retailer (source footer).
+    // Same product at different retailers = different key = both post normally.
+    // Same product + same retailer + same channel within suppressWindow = silently dropped.
+    // Same product after suppressWindow but within restockWindow = posts with "still restocking" note.
+    let dupeAction = 'post';
+    if (!isQueueAlert) {
+      const { action } = duplicateDetector.checkAndRecord(
+        message.channel.id,
+        productInfo.productName,
+        productInfo.source || ''
+      );
+      dupeAction = action;
+
+      if (dupeAction === 'suppress') {
+        logger.info('Duplicate suppressed — skipping post', {
+          product: productInfo.productName?.substring(0, 50) || 'N/A',
+        });
+        return;
+      }
+    }
+
     if (isQueueAlert) {
       logger.info('Processing Pokemon Center queue alert');
     } else {
-      logger.info('Processing restock', {
+      logger.info(`Processing restock [${dupeAction}]`, {
         product: productInfo.productName?.substring(0, 30) || 'N/A',
         price: productInfo.price,
       });
@@ -229,7 +250,7 @@ class DiscordListener {
         tweetText = messageProcessor.formatPokemonCenterQueueAlert();
       } else {
         // Normal product tweet
-        tweetText = messageProcessor.formatForTwitter(productInfo);
+        tweetText = messageProcessor.formatForTwitter(productInfo, dupeAction === 'restock');
         imageUrls = productInfo.images.map(img => img.url);
       }
 
