@@ -36,18 +36,22 @@ class TwitterPoster {
   }
 
   /**
-   * Add tweet to queue
+   * Add tweet to queue.
+   * @param {string} tweetText - Main tweet text
+   * @param {string[]} imageUrls - Optional images for the main tweet
+   * @param {string|null} restockReply - If set, posted as a reply to the main tweet
+   *                                     (only fires when duplicateDetector approves it)
    */
-  async queueTweet(tweetText, imageUrls = []) {
+  async queueTweet(tweetText, imageUrls = [], restockReply = null) {
     if (!config.features.enableTwitter || !this.client) {
       logger.warning('Twitter posting is disabled or not initialized');
       return { success: false, reason: 'disabled' };
     }
 
     return new Promise((resolve) => {
-      this.queue.push({ tweetText, imageUrls, resolve });
+      this.queue.push({ tweetText, imageUrls, restockReply, resolve });
       logger.info('Tweet added to queue', { queueSize: this.queue.length });
-      
+
       if (!this.isProcessing) {
         this.processQueue();
       }
@@ -65,7 +69,6 @@ class TwitterPoster {
     this.isProcessing = true;
 
     while (this.queue.length > 0) {
-      // Check rate limit only if we've posted before
       if (this.lastPostTime > 0) {
         const timeSinceLastPost = Date.now() - this.lastPostTime;
         if (timeSinceLastPost < config.rateLimits.twitterInterval) {
@@ -75,10 +78,23 @@ class TwitterPoster {
         }
       }
 
-      const { tweetText, imageUrls, resolve } = this.queue.shift();
+      const { tweetText, imageUrls, restockReply, resolve } = this.queue.shift();
       const result = await this.postTweet(tweetText, imageUrls);
+
+      // Post reply thread if:
+      //   1. A reply message was provided
+      //   2. The main tweet succeeded
+      //   3. We have a tweet ID to reply to
+      if (restockReply && result.success && result.tweetId) {
+        logger.info('Posting restock reply thread', { parentTweetId: result.tweetId });
+        await this.sleep(1500); // small gap so the thread looks natural
+        const replyResult = await this.postTweet(restockReply, [], result.tweetId);
+        if (!replyResult.success) {
+          logger.warning('Restock reply failed to post', { error: replyResult.error });
+        }
+      }
+
       resolve(result);
-      
       this.lastPostTime = Date.now();
     }
 
@@ -86,49 +102,62 @@ class TwitterPoster {
   }
 
   /**
-   * Post a tweet with optional images
+   * Post a tweet with optional images and optional reply-to parent.
+   * @param {string} tweetText
+   * @param {string[]} imageUrls
+   * @param {string|null} replyToTweetId - If set, posts as a reply to this tweet ID
    */
-  async postTweet(tweetText, imageUrls = []) {
+  async postTweet(tweetText, imageUrls = [], replyToTweetId = null) {
     try {
-      logger.debug('Posting to Twitter...', { textLength: tweetText.length, images: imageUrls.length });
+      logger.debug('Posting to Twitter...', {
+        textLength: tweetText.length,
+        images: imageUrls.length,
+        isReply: !!replyToTweetId,
+      });
 
       let mediaIds = [];
 
-      // Upload images if provided
       if (imageUrls.length > 0) {
         mediaIds = await this.uploadImages(imageUrls);
       }
 
-      // Post tweet
       const tweetPayload = {
         text: tweetText,
       };
 
       if (mediaIds.length > 0) {
-        tweetPayload.media = {
-          media_ids: mediaIds,
-        };
+        tweetPayload.media = { media_ids: mediaIds };
+      }
+
+      // Attach to parent tweet if this is a reply
+      if (replyToTweetId) {
+        tweetPayload.reply = { in_reply_to_tweet_id: replyToTweetId };
       }
 
       const tweet = await this.client.v2.tweet(tweetPayload);
 
-      logger.success('Tweet posted', { tweetId: tweet.data.id });
+      logger.success('Tweet posted', {
+        tweetId: tweet.data.id,
+        isReply: !!replyToTweetId,
+      });
 
       return {
         success: true,
         tweetId: tweet.data.id,
-        url: `https://twitter.com/i/web/status/${tweet.data.id}`
+        url: `https://twitter.com/i/web/status/${tweet.data.id}`,
       };
 
     } catch (error) {
-      logger.error('Failed to post tweet', { 
+      logger.error('Failed to post tweet', {
         error: error.message,
-        code: error.code
+        code: error.code,
+        data: error.data,
+        errors: error.errors,
       });
 
       return {
         success: false,
-        error: error.message
+        error: error.message,
       };
     }
   }
@@ -138,22 +167,19 @@ class TwitterPoster {
    */
   async uploadImages(imageUrls) {
     const mediaIds = [];
-    const maxImages = Math.min(imageUrls.length, 4); // Twitter allows max 4 images
+    const maxImages = Math.min(imageUrls.length, 4);
 
-    // Upload all images in parallel for speed
     const uploadPromises = imageUrls.slice(0, maxImages).map(async (imageUrl) => {
       try {
         logger.debug('Downloading image for Twitter', { url: imageUrl });
 
-        // Download image
         const response = await axios.get(imageUrl, {
           responseType: 'arraybuffer',
-          timeout: 5000, // Reduced timeout for faster failure
+          timeout: 5000,
         });
 
         const imageBuffer = Buffer.from(response.data);
 
-        // Upload to Twitter
         const mediaId = await this.client.v1.uploadMedia(imageBuffer, {
           mimeType: response.headers['content-type'],
         });
@@ -162,17 +188,15 @@ class TwitterPoster {
         return mediaId;
 
       } catch (error) {
-        logger.warning('Failed to upload image to Twitter', { 
+        logger.warning('Failed to upload image to Twitter', {
           url: imageUrl,
-          error: error.message 
+          error: error.message,
         });
         return null;
       }
     });
 
     const results = await Promise.all(uploadPromises);
-    
-    // Filter out failed uploads
     return results.filter(id => id !== null);
   }
 
