@@ -9,21 +9,21 @@ const { config } = require('./config');
  *
  *   { action: 'post'    }  — Never seen before. Post normally.
  *   { action: 'suppress'}  — Same product+retailer+channel within suppressWindow. Drop silently.
- *   { action: 'restock' }  — Past suppressWindow but within restockWindow. Post with note.
+ *   { action: 'restock' }  — Past suppressWindow but within restockWindow. Post with reply note.
  *
- * The key is: channelId + normalised product name + retailer (from embed footer).
- * Target vs Walmart = different keys = both always post independently.
- *
- * PERSISTENCE: Cache is saved to disk on every write so it survives bot restarts,
- * crashes, and redeploys. Without this, a restart during an active restock window
- * causes the bot to re-post the same product as if it were brand new.
+ * checkAndRecordReply():
+ *   Returns true if a reply should be posted (i.e. we haven't replied for this
+ *   product yet within the restockWindow). Prevents reply spam when many restock
+ *   alerts fire in quick succession for the same product.
  */
 
 const CACHE_FILE = path.join(__dirname, '.duplicate-cache.json');
+const REPLY_CACHE_FILE = path.join(__dirname, '.reply-cache.json');
 
 class DuplicateDetector {
   constructor() {
     this.cache = new Map();
+    this.replyCache = new Map(); // tracks last reply time per product key
     this.loadFromDisk();
     this.startCleanupInterval();
   }
@@ -41,7 +41,7 @@ class DuplicateDetector {
           this.cache.set(key, entry);
         }
         logger.info(`Duplicate cache loaded from disk (${this.cache.size} entries)`);
-        this._purgeExpired(); // Drop anything already past restockWindow
+        this._purgeExpired();
       } else {
         logger.debug('No duplicate cache file found — starting fresh');
       }
@@ -50,6 +50,22 @@ class DuplicateDetector {
         error: err.message,
       });
       this.cache = new Map();
+    }
+
+    try {
+      if (fs.existsSync(REPLY_CACHE_FILE)) {
+        const raw = fs.readFileSync(REPLY_CACHE_FILE, 'utf8');
+        const entries = JSON.parse(raw);
+        for (const [key, entry] of entries) {
+          this.replyCache.set(key, entry);
+        }
+        logger.info(`Reply cache loaded from disk (${this.replyCache.size} entries)`);
+      }
+    } catch (err) {
+      logger.warning('Could not load reply cache from disk — starting fresh', {
+        error: err.message,
+      });
+      this.replyCache = new Map();
     }
   }
 
@@ -64,6 +80,17 @@ class DuplicateDetector {
     }
   }
 
+  saveReplyToDisk() {
+    try {
+      const entries = Array.from(this.replyCache.entries());
+      const tmp = REPLY_CACHE_FILE + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(entries), 'utf8');
+      fs.renameSync(tmp, REPLY_CACHE_FILE);
+    } catch (err) {
+      logger.warning('Could not save reply cache to disk', { error: err.message });
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Key building
   // ---------------------------------------------------------------------------
@@ -75,7 +102,7 @@ class DuplicateDetector {
       .replace(/\(ping id: \d+\)/gi, '')
       .replace(/@?\s*\$[\d.,]+/g, '')
       .replace(/item restocked|restock alert/gi, '')
-      .replace(/\[(high|low|limited|in)\s*stock\]/gi, '')  // strip stock level tags
+      .replace(/\[(high|low|limited|in)\s*stock\]/gi, '')
       .replace(/[^a-z0-9\s]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
@@ -111,11 +138,11 @@ class DuplicateDetector {
         entry.lastSeen = now;
         entry.postCount += 1;
         this.saveToDisk();
-        logger.info('Restock repeat — posting with still-restocking note', {
+        logger.info('Restock repeat — posting with still-restocking reply', {
           product: (productName || '').substring(0, 50),
           postCount: entry.postCount,
         });
-        return { action: 'restock' };
+        return { action: 'restock', key };
       }
 
       this.cache.delete(key);
@@ -128,7 +155,37 @@ class DuplicateDetector {
       channel: channelId,
       key: key.substring(0, 8),
     });
-    return { action: 'post' };
+    return { action: 'post', key };
+  }
+
+  /**
+   * Check whether we should post a reply for this product.
+   * Returns true only if no reply has been posted within restockWindow.
+   * This prevents reply spam when many alerts fire for the same product.
+   */
+  checkAndRecordReply(key) {
+    if (!key) return false;
+
+    const now = Date.now();
+
+    if (this.replyCache.has(key)) {
+      const lastReply = this.replyCache.get(key).lastReply;
+      const age = now - lastReply;
+
+      if (age < config.restockWindow) {
+        logger.info('Reply suppressed — already replied within restockWindow', {
+          key: key.substring(0, 8),
+          ageMinutes: (age / 60000).toFixed(1),
+          restockWindowMinutes: (config.restockWindow / 60000).toFixed(0),
+        });
+        return false;
+      }
+    }
+
+    // Record this reply
+    this.replyCache.set(key, { lastReply: now });
+    this.saveReplyToDisk();
+    return true;
   }
 
   // ---------------------------------------------------------------------------
@@ -144,6 +201,12 @@ class DuplicateDetector {
         cleaned++;
       }
     }
+    // Also purge reply cache
+    for (const [key, entry] of this.replyCache.entries()) {
+      if (now - entry.lastReply > config.restockWindow) {
+        this.replyCache.delete(key);
+      }
+    }
     return cleaned;
   }
 
@@ -153,6 +216,7 @@ class DuplicateDetector {
       if (cleaned > 0) {
         logger.debug(`Cleaned ${cleaned} expired entries from duplicate cache`);
         this.saveToDisk();
+        this.saveReplyToDisk();
       }
     }, 60_000);
   }
@@ -160,6 +224,7 @@ class DuplicateDetector {
   getStats() {
     return {
       cacheSize: this.cache.size,
+      replyCacheSize: this.replyCache.size,
       suppressWindowMinutes: config.suppressWindow / 60000,
       restockWindowMinutes: config.restockWindow / 60000,
       cacheFile: CACHE_FILE,
